@@ -1,0 +1,7 @@
+# ONNX Export için Gerekli Paketler
+# Ana proje paketlerine EK olarak bunlar gerekiyor
+
+onnx==1.15.0
+onnxruntime==1.16.3
+
+# Not: torch, numpy zaten ana projede yüklü olmalı

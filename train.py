@@ -7,9 +7,98 @@ import json
 import argparse
 from datetime import datetime
 
+
+class ModelEvaluator:
+    """
+    Model performansını değerlendirir ve en iyi modelleri takip eder
+
+    Model Score = (avg_score * 0.4) + (max_score * 0.2) +
+                  (consistency_bonus * 0.2) + (avg_frames/100 * 0.2)
+    """
+    def __init__(self):
+        self.best_model_score = -float('inf')
+        self.best_stability_score = -float('inf')
+        self.best_episode = 0
+        self.stable_episode = 0
+
+    def calculate_model_score(self, scores, frames_list, window=100):
+        """
+        Model kalitesini hesapla
+
+        Args:
+            scores: Skor listesi
+            frames_list: Frame sayıları listesi
+            window: Değerlendirme penceresi (son N episode)
+
+        Returns:
+            dict: {'model_score', 'avg_score', 'max_score', 'std_dev', 'avg_frames'}
+        """
+        if len(scores) < window:
+            window = len(scores)
+
+        if window == 0:
+            return {
+                'model_score': 0,
+                'avg_score': 0,
+                'max_score': 0,
+                'std_dev': 0,
+                'avg_frames': 0,
+                'consistency_bonus': 0
+            }
+
+        recent_scores = scores[-window:]
+        recent_frames = frames_list[-window:] if len(frames_list) >= window else frames_list
+
+        # Metrikler
+        avg_score = np.mean(recent_scores)
+        max_score = np.max(recent_scores)
+        std_dev = np.std(recent_scores)
+        avg_frames = np.mean(recent_frames) if recent_frames else 0
+
+        # Consistency bonus (düşük std_dev = yüksek bonus)
+        # std_dev = 0 → bonus = 10
+        # std_dev = 10+ → bonus = 0
+        consistency_bonus = max(0, 10 - std_dev)
+
+        # Model Score hesapla
+        model_score = (
+            avg_score * 0.4 +
+            max_score * 0.2 +
+            consistency_bonus * 0.2 +
+            (avg_frames / 100) * 0.2
+        )
+
+        return {
+            'model_score': model_score,
+            'avg_score': avg_score,
+            'max_score': max_score,
+            'std_dev': std_dev,
+            'avg_frames': avg_frames,
+            'consistency_bonus': consistency_bonus
+        }
+
+    def should_save_best(self, current_score):
+        """En iyi model kaydedilmeli mi?"""
+        return current_score > self.best_model_score
+
+    def should_save_stable(self, consistency_bonus):
+        """Stabil model kaydedilmeli mi?"""
+        return consistency_bonus > self.best_stability_score
+
+    def update_best(self, model_score, episode):
+        """En iyi model skorunu güncelle"""
+        self.best_model_score = model_score
+        self.best_episode = episode
+
+    def update_stable(self, consistency_bonus, episode):
+        """En stabil model skorunu güncelle"""
+        self.best_stability_score = consistency_bonus
+        self.stable_episode = episode
+
+
 def train(
-    episodes=1000,
-    render=True,
+    episodes=2000,
+    render=False,
     save_interval=50,
     model_path="models/flappy_dqn.pth",
     load_checkpoint=False,
@@ -30,11 +119,15 @@ def train(
     game = FlappyBirdGame(render=render)
     agent = DQNAgent()
 
+    # Model evaluator
+    evaluator = ModelEvaluator()
+
     # İstatistikler
     scores = []
     avg_scores = []
     losses = []
     epsilons = []
+    frames_list = []  # Survival rate için
     start_episode = 0
 
     # Checkpoint yükle (eğer varsa)
@@ -51,7 +144,17 @@ def train(
                 avg_scores = history.get('avg_scores', [])
                 losses = history.get('losses', [])
                 epsilons = history.get('epsilons', [])
+                frames_list = history.get('frames_list', [])
                 start_episode = len(scores)
+
+                # Evaluator'ı güncelle
+                if 'best_model_score' in history:
+                    evaluator.best_model_score = history['best_model_score']
+                    evaluator.best_episode = history.get('best_episode', 0)
+                if 'best_stability_score' in history:
+                    evaluator.best_stability_score = history['best_stability_score']
+                    evaluator.stable_episode = history.get('stable_episode', 0)
+
                 print(f"✓ Training history yüklendi: {len(scores)} episode")
                 print(f"  Son ortalama skor: {avg_scores[-1] if avg_scores else 0:.2f}")
     else:
@@ -106,6 +209,7 @@ def train(
         score = info['score']
         scores.append(score)
         epsilons.append(agent.epsilon)
+        frames_list.append(frames)
 
         # Ortalama skor (son 100 episode)
         avg_score = np.mean(scores[-100:])
@@ -125,10 +229,33 @@ def train(
 
         # Model ve history kaydet
         if episode % save_interval == 0:
+            # Latest model kaydet
             agent.save(model_path)
+
+            # Model performansını değerlendir
+            eval_result = evaluator.calculate_model_score(scores, frames_list, window=100)
+
+            # Best model kaydet
+            if evaluator.should_save_best(eval_result['model_score']):
+                best_path = model_path.replace('.pth', '_best.pth')
+                agent.save(best_path)
+                evaluator.update_best(eval_result['model_score'], episode)
+                print(f"  🏆 Yeni BEST model! Score: {eval_result['model_score']:.2f}")
+
+            # Stable model kaydet
+            if evaluator.should_save_stable(eval_result['consistency_bonus']):
+                stable_path = model_path.replace('.pth', '_stable.pth')
+                agent.save(stable_path)
+                evaluator.update_stable(eval_result['consistency_bonus'], episode)
+                print(f"  ⚖️  Yeni STABLE model! Consistency: {eval_result['consistency_bonus']:.2f}")
+
             # Training history kaydet
-            save_training_history(history_path, scores, avg_scores, losses, epsilons)
-            print(f"✓ Model ve history kaydedildi (episode {episode})")
+            save_training_history(
+                history_path, scores, avg_scores, losses, epsilons, frames_list,
+                evaluator.best_model_score, evaluator.best_episode,
+                evaluator.best_stability_score, evaluator.stable_episode
+            )
+            print(f"✓ Checkpoint kaydedildi (episode {episode})")
 
         # Başarı mesajı
         if avg_score > 10:
@@ -140,14 +267,29 @@ def train(
 
     # Final model ve history kaydet
     agent.save(model_path)
-    save_training_history(history_path, scores, avg_scores, losses, epsilons)
+
+    # Son değerlendirme
+    final_eval = evaluator.calculate_model_score(scores, frames_list, window=100)
+
+    save_training_history(
+        history_path, scores, avg_scores, losses, epsilons, frames_list,
+        evaluator.best_model_score, evaluator.best_episode,
+        evaluator.best_stability_score, evaluator.stable_episode
+    )
+
     print("\n" + "=" * 50)
     print("EĞİTİM TAMAMLANDI!")
     print("=" * 50)
     print(f"Toplam Episode: {len(scores)}")
     print(f"Final Avg Score: {avg_scores[-1] if avg_scores else 0:.2f}")
-    print(f"Model: {model_path}")
-    print(f"History: {history_path}")
+    print(f"Final Model Score: {final_eval['model_score']:.2f}")
+    print(f"Best Model Score: {evaluator.best_model_score:.2f} (Episode {evaluator.best_episode})")
+    print(f"Best Stability: {evaluator.best_stability_score:.2f} (Episode {evaluator.stable_episode})")
+    print("\nKaydedilen Modeller:")
+    print(f"  Latest:  {model_path}")
+    print(f"  Best:    {model_path.replace('.pth', '_best.pth')}")
+    print(f"  Stable:  {model_path.replace('.pth', '_stable.pth')}")
+    print(f"  History: {history_path}")
     print("=" * 50)
 
     # Oyunu kapat
@@ -159,21 +301,27 @@ def train(
     return agent, scores
 
 
-def save_training_history(history_path, scores, avg_scores, losses, epsilons):
+def save_training_history(
+    history_path, scores, avg_scores, losses, epsilons, frames_list,
+    best_model_score, best_episode, best_stability_score, stable_episode
+):
     """Training history'yi JSON olarak kaydet"""
     history = {
         'scores': scores,
         'avg_scores': avg_scores,
         'losses': losses,
         'epsilons': epsilons,
+        'frames_list': frames_list,
         'total_episodes': len(scores),
+        'best_model_score': best_model_score,
+        'best_episode': best_episode,
+        'best_stability_score': best_stability_score,
+        'stable_episode': stable_episode,
         'last_updated': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
 
     with open(history_path, 'w') as f:
         json.dump(history, f, indent=2)
-
-    # Başarı mesajı yok, çünkü zaten üstte gösteriyoruz
 
 
 def plot_training_results(scores, avg_scores, losses, epsilons, start_episode=0):
@@ -222,16 +370,14 @@ def plot_training_results(scores, avg_scores, losses, epsilons, start_episode=0)
 if __name__ == "__main__":
     # Komut satırı argümanları
     parser = argparse.ArgumentParser(description='Flappy Bird DQN Training')
-    parser.add_argument('--episodes', type=int, default=500,
-                        help='Eğitilecek episode sayısı (default: 500)')
-    parser.add_argument('--render', action='store_true', default=True,
-                        help='Görselleştirme yapılsın mı? (default: True)')
-    parser.add_argument('--no-render', dest='render', action='store_false',
-                        help='Görselleştirme kapalı (hızlı eğitim)')
-    parser.add_argument('--continue', dest='continue_training', action='store_true',
-                        help='Mevcut checkpoint\'tan devam et')
+    parser.add_argument('--episodes', type=int, default=2000,
+                        help='Eğitilecek episode sayısı (default: 2000)')
+    parser.add_argument('--render', action='store_true', default=False,
+                        help='Görselleştirme açık (yavaş ama izlenebilir)')
     parser.add_argument('--save-interval', type=int, default=50,
                         help='Model kayıt aralığı (default: 50)')
+    parser.add_argument('--continue', dest='continue_training', action='store_true',
+                        help='Mevcut checkpoint\'tan devam et')
     parser.add_argument('--model-path', type=str, default='models/flappy_dqn.pth',
                         help='Model kayıt yolu')
 

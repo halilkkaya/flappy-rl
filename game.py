@@ -139,6 +139,55 @@ class FlappyBirdGame:
 
         return state
 
+    def _get_next_pipe(self):
+        """En yakın boruyu döndür (helper fonksiyon)"""
+        for pipe in self.pipes:
+            if pipe.x + pipe.width > self.bird.x:
+                return pipe
+        return None
+
+    def _calculate_position_reward(self, pipe):
+        """
+        Boşluğun ortasına yakınlık reward'ı (max +0.5)
+
+        Args:
+            pipe: En yakın boru
+
+        Returns:
+            float: 0.0 ~ 0.5 arası reward
+        """
+        if pipe is None:
+            return 0.0
+
+        # Kuşun boşluğun ortasına olan mesafesi
+        bird_center_y = self.bird.y + self.bird.height / 2
+        gap_center_y = pipe.gap_y
+        distance = abs(bird_center_y - gap_center_y)
+
+        # Normalize et (0-1 arası)
+        max_distance = SCREEN_HEIGHT / 2
+        normalized_distance = min(distance / max_distance, 1.0)
+
+        # Yakınsa daha fazla reward (ters orantılı)
+        # distance=0 → reward=0.5
+        # distance=max → reward=0.0
+        reward = 0.5 * (1.0 - normalized_distance)
+
+        return reward
+
+    def _calculate_stability_reward(self):
+        """
+        Stabil uçuş bonusu (+0.05)
+        Hız çok yüksek veya çok düşük değilse
+
+        Returns:
+            float: 0.0 veya 0.05
+        """
+        # İdeal hız aralığı: -8 ile 8 arası
+        if -8 <= self.bird.velocity <= 8:
+            return 0.05
+        return 0.0
+
     def step(self, action):
         """
         Bir adım ilerlet
@@ -169,8 +218,20 @@ class FlappyBirdGame:
         # Ekran dışına çıkan boruları sil
         self.pipes = [pipe for pipe in self.pipes if not pipe.is_off_screen()]
 
-        # Reward hesapla
-        reward = 0.1  # Hayatta kalma bonusu
+        # En yakın boruyu bul (reward hesaplamaları için)
+        next_pipe = self._get_next_pipe()
+
+        # Reward hesapla (Gelişmiş Reward Shaping)
+        reward = 0.1  # Temel hayatta kalma bonusu
+
+        # 1. Boşluğun ortasına yakınlık reward'ı (+0.0 ~ +0.5)
+        if next_pipe is not None:
+            position_reward = self._calculate_position_reward(next_pipe)
+            reward += position_reward
+
+        # 2. Stabil uçuş bonusu (+0.05)
+        stability_reward = self._calculate_stability_reward()
+        reward += stability_reward
 
         # Çarpışma kontrolü
         done = False
@@ -192,7 +253,7 @@ class FlappyBirdGame:
             if not pipe.passed and pipe.x + pipe.width < self.bird.x:
                 pipe.passed = True
                 self.score += 1
-                reward = 10  # Borudan geçme bonusu
+                reward = 10  # Borudan geçme bonusu (ana ödül)
 
         next_state = self.get_state()
         info = {'score': self.score, 'frames': self.frames}

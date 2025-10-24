@@ -156,15 +156,25 @@ def play_interactive(model_path="models/flappy_dqn.pth"):
 
 
 if __name__ == "__main__":
-    import sys
+    import argparse
 
-    if len(sys.argv) > 1 and sys.argv[1] == "interactive":
+    parser = argparse.ArgumentParser(description='Flappy Bird - Eğitilmiş Model İzleme')
+    parser.add_argument('--model-path', type=str, default='models/flappy_dqn_best.pth',
+                        help='Model dosya yolu (default: flappy_dqn_best.pth)')
+    parser.add_argument('--episodes', type=int, default=5,
+                        help='Kaç oyun oynanacak (default: 5)')
+    parser.add_argument('--interactive', action='store_true',
+                        help='İnteraktif mod (manuel/otomatik geçiş)')
+
+    args = parser.parse_args()
+
+    if args.interactive:
         # İnteraktif mod
-        play_interactive()
+        play_interactive(model_path=args.model_path)
     else:
         # Normal izleme modu
         play(
-            model_path="models/flappy_dqn.pth",
-            episodes=5,  # 5 oyun izle
+            model_path=args.model_path,
+            episodes=args.episodes,
             fps_limit=60
         )
